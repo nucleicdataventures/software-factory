@@ -1,0 +1,12 @@
+name: default
+version: 1
+nodes:
+  - { id: intake, role: Intake, next: plan }
+  - { id: plan, role: Planner, next: plan-gate }
+  - { id: plan-gate, gate: plan, next: author-tests }
+  - { id: author-tests, role: Test Author, next: implement }
+  - { id: implement, role: Implementer, next: independent-review }
+  - { id: independent-review, role: Independent Reviewer, next: verify-in-fresh-sandbox }
+  - { id: verify-in-fresh-sandbox, executor: CODE, next: merge-gate }
+  - { id: merge-gate, gate: merge, next: package-draft-pr }
+  - { id: package-draft-pr, role: Integrator, next: complete }

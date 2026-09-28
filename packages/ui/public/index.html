@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f2ed" />
+    <title>Forge · Control room</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Forge factory floor">
+          <span class="brand-mark" aria-hidden="true">F</span>
+          <span class="brand-name">forge<span class="brand-dot">.</span></span>
+          <span class="brand-divider"></span>
+          <span class="brand-context">control room</span>
+        </a>
+        <div class="topbar-right">
+          <span class="local-label"><span class="local-pulse"></span> LOCAL FACTORY</span>
+          <button class="button button-primary button-compact" data-action="new-job">New job <span aria-hidden="true">＋</span></button>
+        </div>
+      </header>
+
+      <div class="health-strip" id="health-strip" aria-live="polite">
+        <span class="health-label">SYSTEM CHECK</span>
+        <span class="health-value">Connecting to Forge…</span>
+      </div>
+
+      <div class="error-banner" id="error-banner" role="alert" hidden>
+        <span class="error-icon" aria-hidden="true">!</span>
+        <div><strong>Action needs attention</strong><p id="error-message"></p></div>
+        <button class="icon-button" data-action="dismiss-error" aria-label="Dismiss error">×</button>
+      </div>
+
+      <main id="main-content" class="main-content" tabindex="-1"></main>
+
+      <footer class="footer-line">
+        <span>HUMANS OWN INTENT &amp; MERGE</span>
+        <span>FACTORY RUNS LOCALLY · REFRESHES EVERY SECOND</span>
+      </footer>
+    </div>
+
+    <div class="modal-backdrop" id="job-modal" hidden>
+      <section class="job-dialog" role="dialog" aria-modal="true" aria-labelledby="job-title">
+        <div class="dialog-topline"><span class="eyebrow">START A WORK ITEM</span><button class="icon-button" data-action="close-job" aria-label="Close">×</button></div>
+        <h1 id="job-title">What should the factory build?</h1>
+        <p class="dialog-copy">Forge will turn this into a spec and plan, then stop for your approval.</p>
+        <form id="job-form">
+          <label class="field-label" for="job-kind">Request source</label>
+          <select id="job-kind" name="kind" class="select-field">
+            <option value="prompt">Write a request</option>
+            <option value="example">Use the example spec</option>
+          </select>
+          <div id="prompt-field-wrap">
+            <label class="field-label" for="job-prompt">Build request</label>
+            <textarea id="job-prompt" name="prompt" rows="5" placeholder="Add a GET /health endpoint to the demo app…"></textarea>
+          </div>
+          <div id="example-field-wrap" class="example-card" hidden>
+            <span class="example-icon">↳</span>
+            <div><strong>specs/EXAMPLE.md</strong><span>Seed the bundled example and create a plan gate.</span></div>
+          </div>
+          <div class="dialog-actions">
+            <button type="button" class="button button-quiet" data-action="close-job">Cancel</button>
+            <button type="submit" class="button button-primary" id="create-job-button">Create job <span aria-hidden="true">→</span></button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </body>
+</html>

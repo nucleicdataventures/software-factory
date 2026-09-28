@@ -1,0 +1,64 @@
+version: 1
+inlets:
+  - cli
+graph:
+  - stage: intake
+    role: Intake
+    next: plan
+  - stage: plan
+    role: Planner
+    next: plan-gate
+  - stage: plan-gate
+    gate: plan
+    next: author-tests
+  - stage: author-tests
+    role: Test Author
+    next: implement
+  - stage: implement
+    role: Implementer
+    next: independent-review
+  - stage: independent-review
+    role: Independent Reviewer
+    next: verify-in-fresh-sandbox
+  - stage: verify-in-fresh-sandbox
+    executor: CODE
+    next: merge-gate
+  - stage: merge-gate
+    gate: merge
+    next: package-draft-pr
+  - stage: package-draft-pr
+    role: Integrator
+    next: complete
+roles:
+  - Intake
+  - Planner
+  - Test Author
+  - Implementer
+  - Independent Reviewer
+  - Integrator
+harnesses:
+  default: stub
+  stub:
+    adapter: StubHarness
+    model: deterministic
+  codex:
+    adapter: CodexHarness
+    model: unknown
+budgets:
+  defaults:
+    tokens: 30000
+    usd: 2.00
+    retries: 2
+    wall_clock_seconds: 1800
+sandbox:
+  image: node:22-bookworm-slim
+  network: none
+  read_only_root: true
+  writable_mount: job-worktree
+gates:
+  plan: required
+  merge: required
+merge_policy:
+  mode: local-patch-or-draft-pr-bundle
+  auto_merge: false
+  force_push: false

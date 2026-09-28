@@ -1,0 +1,29 @@
+{
+  "name": "forge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=22.13.0 <23"
+  },
+  "scripts": {
+    "build": "pnpm -r --sort --if-present build",
+    "typecheck": "pnpm build",
+    "test": "pnpm typecheck && vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "api": "workspace:*",
+    "cli": "workspace:*",
+    "control-plane": "workspace:*",
+    "evidence": "workspace:*",
+    "forge-ui": "workspace:*",
+    "ledger": "workspace:*",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "worker": "workspace:*"
+  }
+}
