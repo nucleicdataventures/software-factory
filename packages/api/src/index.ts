@@ -2,12 +2,19 @@ import { spawn } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { Orchestrator, type WorkItemView } from "control-plane";
+import {
+  Orchestrator,
+  resolveHostBinary,
+  usesWindowsCommandShell,
+  windowsCommandShellInvocation,
+  type WorkItemView,
+} from "control-plane";
 import type { Gate, RunRecord, WorkItem } from "ledger";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_EVIDENCE_BYTES = 2 * 1024 * 1024;
 const WORK_ID = /^forge-[0-9]{8}-[a-f0-9]{8}$/i;
+const DOCKER_HEALTH_TIMEOUT_MS = 5_000;
 
 export interface ForgeHttpOptions {
   root: string;
@@ -248,39 +255,70 @@ function requireGate(body: Record<string, unknown>): Gate {
   return gate;
 }
 
-function dockerStatus(): Promise<boolean> {
+interface DockerHealthStatus {
+  available: boolean;
+  message?: string;
+}
+
+function dockerStatus(): Promise<DockerHealthStatus> {
+  const executable = resolveHostBinary("docker");
+  if (!executable) return Promise.resolve({ available: false, message: "Docker CLI was not found on PATH or the configured Docker Desktop location." });
+
   return new Promise((resolveStatus) => {
     let settled = false;
-    const done = (available: boolean) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const done = (status: DockerHealthStatus) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolveStatus(available);
+      resolveStatus(status);
     };
-    const child = spawn("docker", ["info", "--format", "{{.Server.Version}}"], { stdio: "ignore", windowsHide: true });
+    const shellInvocation = usesWindowsCommandShell(executable) ? windowsCommandShellInvocation(executable, ["info"]) : null;
+    const child = spawn(shellInvocation?.command ?? executable, shellInvocation?.args ?? ["info"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      ...(shellInvocation ? { env: { ...process.env, ...shellInvocation.env } } : {}),
+      ...(shellInvocation ? { windowsVerbatimArguments: true } : {}),
+    });
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill();
-      done(false);
-    }, 1200);
-    child.once("error", () => done(false));
-    child.once("exit", (code) => done(code === 0));
+      done({ available: false, message: `docker info timed out after ${DOCKER_HEALTH_TIMEOUT_MS}ms.` });
+    }, DOCKER_HEALTH_TIMEOUT_MS);
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    child.once("error", (error) => done({ available: false, message: error.message }));
+    child.once("close", (code) => {
+      if (timedOut) return;
+      if (code === 0 && /^[ \t]*Server Version:\s*\S+/im.test(stdout)) {
+        done({ available: true });
+        return;
+      }
+      const message = code === 0
+        ? "docker info did not report a Server Version."
+        : stderr.trim() || stdout.trim() || `docker info exited with code ${code ?? 1}.`;
+      done({ available: false, message });
+    });
   });
 }
 
 function createHealthReader(orchestrator: Orchestrator): () => Promise<Record<string, unknown>> {
-  let cached: { at: number; available: boolean; codex: Awaited<ReturnType<Orchestrator["getCodexLoginStatus"]>> } | null = null;
-  let pending: Promise<{ available: boolean; codex: Awaited<ReturnType<Orchestrator["getCodexLoginStatus"]>> }> | null = null;
+  let cached: { at: number; docker: DockerHealthStatus; codex: Awaited<ReturnType<Orchestrator["getCodexLoginStatus"]>> } | null = null;
+  let pending: Promise<{ docker: DockerHealthStatus; codex: Awaited<ReturnType<Orchestrator["getCodexLoginStatus"]>> }> | null = null;
   return async () => {
     if (!cached || Date.now() - cached.at > 2500) {
       pending ??= Promise.all([dockerStatus(), orchestrator.getCodexLoginStatus()])
-        .then(([available, codex]) => ({ available, codex }))
+        .then(([docker, codex]) => ({ docker, codex }))
         .finally(() => { pending = null; });
       const status = await pending;
       cached = { at: Date.now(), ...status };
     }
     return {
       node: process.version,
-      docker: cached.available ? "up" : "down",
+      docker: cached.docker.available ? "up" : "down",
+      ...(!cached.docker.available ? { dockerMessage: cached.docker.message } : {}),
       harness: orchestrator.harness.name,
       codex: cached.codex.state,
       codexMessage: cached.codex.message,

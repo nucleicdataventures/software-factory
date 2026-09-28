@@ -33,4 +33,6 @@ $env:FORGE_HARNESS = "codex"
 pnpm --filter cli exec forge serve --host 127.0.0.1 --port 8787
 ```
 
+Set `FORGE_CODEX_BIN` or `FORGE_DOCKER_BIN` to override executable discovery.
+
 On Windows, open Start → Docker Desktop, then wait for its dashboard to report that the engine is running. In PowerShell, run `docker info` and confirm it prints the Server section before approving a plan. If Docker is down, Forge keeps the last good stage and reports the Docker error; it does not skip verification.

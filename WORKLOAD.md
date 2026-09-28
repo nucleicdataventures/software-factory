@@ -1,12 +1,12 @@
 # Forge workload
 
-Last reconciled: 2026-09-27 (America/Mexico_City)
+Last reconciled: 2026-09-28 (America/Mexico_City)
 
 ## In progress
 
 | ID | Outcome | Status | Next action | Blocked by | Evidence | Last verified |
 |---|---|---|---|---|---|---|
-| FORGE-003 | Make host-side CodexHarness available for Forge jobs while keeping Docker verification honest | blocked | Start Docker Desktop until `docker info` returns server details, then restart the existing loopback server with `FORGE_HARNESS=codex` before the live New Job flow | Docker daemon is down; the preserved listener at `127.0.0.1:8787` still reports the older Stub API | `pnpm test` (37 passed); `pnpm typecheck`; `codex login status`; `README.md` | 2026-09-27 |
+| FORGE-003 | Make host-side CodexHarness available for Forge jobs while keeping Docker verification honest | blocked | Resolve the per-item token budget for live host Codex verification before another Planner run; preserve the three dead-lettered jobs and their plans | All three real Planner attempts exceeded the configured 30,000-token per-item cap (339,370; 134,954; 80,399); Forge dead-lettered them and recorded no gate approvals, including for the plan the user authorized | `pnpm test` (48 passed across 6 files); focused CodexHarness tests (11/11); Gitleaks clean; `GET /api/health` on `127.0.0.1:8789` reported Docker up, Codex logged-in, harness codex; runs and plans retained in `.forge`; latest verification logs under `Projects/.memory/workspace-git-sync/verification/20260928T092528-software-factory-full-final/`, `20260928T092628-software-factory-security-final/`, and `20260928T092720-forge-final-bounded-run/` | 2026-09-28 |
 
 ## Recently completed
 

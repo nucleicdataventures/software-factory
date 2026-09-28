@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { reviewerInput, type HarnessAdapter, type HarnessRequest, type HarnessResult, type ReviewerRequest } from "./harness.js";
+import {
+  resolveBinaryFile,
+  resolveHostBinary,
+  usesWindowsCommandShell,
+  windowsCommandShellInvocation,
+} from "./binaries.js";
 
 export type CodexErrorCode =
   | "CODEX_NOT_FOUND"
@@ -47,10 +53,6 @@ export interface CodexHarnessOptions {
 const LOGIN_TIMEOUT_MS = 5_000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
-function codexExecutable(): string {
-  return process.platform === "win32" ? "codex.exe" : "codex";
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -66,7 +68,23 @@ export function runCodexCommand(executable: string, args: string[], cwd: string,
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    const child = spawn(executable, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    if (!isAbsolute(executable)) {
+      const error = Object.assign(new Error("Codex executable path must be absolute."), { code: "ENOENT" });
+      reject(error);
+      return;
+    }
+    const useShell = usesWindowsCommandShell(executable);
+    const prompt = useShell && args[0] === "exec" ? args[args.length - 1] : undefined;
+    const commandArgs = prompt === undefined ? args : [...args.slice(0, -1), "-"];
+    const shellInvocation = useShell ? windowsCommandShellInvocation(executable, commandArgs) : null;
+    const child = spawn(shellInvocation?.command ?? executable, shellInvocation?.args ?? commandArgs, {
+      cwd,
+      windowsHide: true,
+      stdio: [prompt === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      ...(shellInvocation ? { env: { ...process.env, ...shellInvocation.env } } : {}),
+      ...(shellInvocation ? { windowsVerbatimArguments: true } : {}),
+    });
+    if (prompt !== undefined) child.stdin?.end(prompt);
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill();
@@ -78,11 +96,11 @@ export function runCodexCommand(executable: string, args: string[], cwd: string,
       if (error) reject(error);
       else resolveResult(result ?? { exitCode: 1, stdout, stderr });
     };
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
       if (Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) child.kill();
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
       if (Buffer.byteLength(stderr) > MAX_OUTPUT_BYTES) child.kill();
     });
@@ -100,11 +118,14 @@ export function runCodexCommand(executable: string, args: string[], cwd: string,
 }
 
 export async function probeCodexLoginStatus(options: {
-  executable?: string;
+  executable?: string | null;
   runCommand?: CodexCommandRunner;
   timeoutMs?: number;
 } = {}): Promise<CodexLoginStatus> {
-  const executable = options.executable ?? codexExecutable();
+  const executable = options.executable === undefined
+    ? resolveHostBinary("codex")
+    : resolveBinaryFile(options.executable);
+  if (!executable) return { state: "missing", message: "Codex CLI was not found on PATH." };
   const runner = options.runCommand ?? ((args, cwd, timeoutMs) => runCodexCommand(executable, args, cwd, timeoutMs));
   try {
     const result = await runner(["login", "status"], process.cwd(), options.timeoutMs ?? LOGIN_TIMEOUT_MS);
@@ -129,8 +150,8 @@ export function buildCodexExecArgs(request: HarnessRequest, prompt: string): str
     sandbox,
     "--config",
     'approval_policy="never"',
-    "-C",
-    resolve(workspacePath),
+    "--config",
+    'model_reasoning_effort="low"',
     prompt,
   ];
 }
@@ -139,7 +160,9 @@ export function buildCodexPrompt(request: HarnessRequest): string {
   if (request.stage === "plan") {
     return [
       "You are Forge's Planner.",
-      "Read the supplied spec and write a clear implementation plan to plan.md at the worktree root.",
+      "Use only the supplied spec to write a concise implementation plan to plan.md at the worktree root.",
+      "Do not run commands, inspect files, or search the repository during planning.",
+      "Limit plan.md to at most six concise numbered steps.",
       "Only create or change plan.md. Do not edit source code or tests.",
       "Do not merge, push, or modify Forge state.",
       "",
@@ -271,7 +294,7 @@ function rolePolicyError(request: HarnessRequest, files: string[]): string | nul
 
 export class CodexHarness implements HarnessAdapter {
   readonly name = "codex";
-  private readonly executable: string;
+  readonly executablePath: string | null;
   private readonly timeoutMs: number;
   private readonly tokenLimit: number;
   private readonly runCommand: CodexCommandRunner;
@@ -279,11 +302,14 @@ export class CodexHarness implements HarnessAdapter {
   private readonly changedFiles: (cwd: string, before: Map<string, string>) => string[];
 
   constructor(options: CodexHarnessOptions = {}) {
-    this.executable = options.executable ?? codexExecutable();
+    this.executablePath = options.executable === undefined ? resolveHostBinary("codex") : resolveBinaryFile(options.executable);
     this.timeoutMs = options.timeoutMs ?? 30 * 60_000;
     this.tokenLimit = options.tokenLimit ?? 30_000;
-    this.runCommand = options.runCommand ?? ((args, cwd, timeoutMs) => runCodexCommand(this.executable, args, cwd, timeoutMs));
-    this.loginProbe = options.loginProbe ?? (() => probeCodexLoginStatus({ executable: this.executable, runCommand: this.runCommand }));
+    this.runCommand = options.runCommand ?? ((args, cwd, timeoutMs) => {
+      if (!this.executablePath) return Promise.reject(Object.assign(new Error("Codex CLI was not found on PATH."), { code: "ENOENT" }));
+      return runCodexCommand(this.executablePath, args, cwd, timeoutMs);
+    });
+    this.loginProbe = options.loginProbe ?? (() => probeCodexLoginStatus({ executable: this.executablePath, runCommand: this.runCommand }));
     this.changedFiles = options.changedFiles ?? readChangedFiles;
   }
 

@@ -2,6 +2,27 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
+import { resolveHostBinary, usesWindowsCommandShell, windowsCommandShellInvocation } from "./binaries.js";
+
+export interface DockerSpawnResult {
+  status: number | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  error?: NodeJS.ErrnoException;
+}
+
+export type DockerSpawn = (
+  command: string,
+  args: string[],
+  options: {
+    encoding: "utf8";
+    windowsHide: true;
+    env: NodeJS.ProcessEnv;
+    timeout?: number;
+    killSignal?: NodeJS.Signals;
+    windowsVerbatimArguments?: boolean;
+  },
+) => DockerSpawnResult;
 
 export interface SandboxIdentity {
   workId: string;
@@ -73,20 +94,39 @@ export function dockerRunArgs(identity: SandboxIdentity, workspacePath: string, 
 }
 
 export class DockerSandbox {
+  private readonly spawn: DockerSpawn;
+
+  constructor(options: { spawn?: DockerSpawn } = {}) {
+    this.spawn = options.spawn ?? ((command, args, spawnOptions) => spawnSync(command, args, spawnOptions));
+  }
+
   run(identity: SandboxIdentity, workspacePath: string, command: string[], dependencyPaths: string[] = [], timeoutMs = 30 * 60_000): SandboxResult {
     const args = dockerRunArgs(identity, workspacePath, command, dependencyPaths);
+    const executable = resolveHostBinary("docker");
+    if (!executable) throw new Error("Could not start Docker sandbox: Docker CLI was not found on PATH or the configured Docker Desktop location.");
+    const usesShell = usesWindowsCommandShell(executable);
     const cliEnv: NodeJS.ProcessEnv = {};
     for (const key of ["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP", "COMSPEC", "PATHEXT", "USERPROFILE", "HOME"]) {
       const value = process.env[key];
       if (value) cliEnv[key] = value;
     }
-    const result = spawnSync("docker", args, { encoding: "utf8", windowsHide: true, env: cliEnv, timeout: timeoutMs, killSignal: "SIGKILL" });
+    const runDocker = (dockerArgs: string[], timeout?: number) => {
+      const shellInvocation = usesShell ? windowsCommandShellInvocation(executable, dockerArgs) : null;
+      return this.spawn(shellInvocation?.command ?? executable, shellInvocation?.args ?? dockerArgs, {
+        encoding: "utf8",
+        windowsHide: true,
+        env: { ...cliEnv, ...shellInvocation?.env },
+        ...(timeout === undefined ? {} : { timeout, killSignal: "SIGKILL" as const }),
+        ...(shellInvocation ? { windowsVerbatimArguments: true } : {}),
+      });
+    };
+    const result = runDocker(args, timeoutMs);
     const spawnError = result.error as NodeJS.ErrnoException | undefined;
     if (spawnError && spawnError.code !== "ETIMEDOUT") throw new Error(`Could not start Docker sandbox: ${spawnError.message}`);
     if (spawnError?.code === "ETIMEDOUT") {
-      const ids = spawnSync("docker", ["ps", "--quiet", "--filter", `label=forge.sandbox-id=${identity.sandboxId}`], { encoding: "utf8", windowsHide: true, env: cliEnv });
+      const ids = runDocker(["ps", "--quiet", "--filter", `label=forge.sandbox-id=${identity.sandboxId}`]);
       for (const id of (ids.stdout ?? "").split(/\r?\n/).filter(Boolean)) {
-        spawnSync("docker", ["rm", "--force", id], { encoding: "utf8", windowsHide: true, env: cliEnv });
+        runDocker(["rm", "--force", id]);
       }
       return { exitCode: 124, stdout: result.stdout ?? "", stderr: `${result.stderr ?? ""}\nSandbox exceeded its wall-clock limit`.trim(), sandboxId: identity.sandboxId };
     }

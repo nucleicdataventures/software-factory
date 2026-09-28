@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,15 +7,16 @@ import { createForgeHttpServer } from "api";
 import { Orchestrator, type OrchestratorOptions, type TestExecutor } from "control-plane";
 import { Ledger } from "ledger";
 import { parseServeOptions } from "cli";
-import { GitWorktreeManager, StubHarness, type HarnessAdapter } from "worker";
+import { CodexHarness, GitWorktreeManager, StubHarness, type HarnessAdapter } from "worker";
 
 const repositoryRoot = process.cwd();
 const fixtures: Array<{ root: string; orchestrator: Orchestrator; server: ReturnType<typeof createForgeHttpServer>; baseUrl: string }> = [];
+const temporaryRoots: string[] = [];
 
 interface FixtureOptions {
   harness?: HarnessAdapter;
   testExecutor?: TestExecutor;
-  codexStatusProbe?: OrchestratorOptions["codexStatusProbe"];
+  codexStatusProbe?: OrchestratorOptions["codexStatusProbe"] | null;
 }
 
 async function fixture(options: FixtureOptions = {}) {
@@ -39,8 +40,10 @@ async function fixture(options: FixtureOptions = {}) {
     ledger,
     worktrees: new GitWorktreeManager(root),
     harness: options.harness ?? new StubHarness(),
-    codexStatusProbe: options.codexStatusProbe ?? (async () => ({ state: "logged-in", message: "Codex is logged in on the host." })),
   };
+  if (options.codexStatusProbe !== null) {
+    orchestratorOptions.codexStatusProbe = options.codexStatusProbe ?? (async () => ({ state: "logged-in", message: "Codex is logged in on the host." }));
+  }
   if (options.testExecutor) orchestratorOptions.testExecutor = options.testExecutor;
   const orchestrator = new Orchestrator(root, orchestratorOptions);
   const server = createForgeHttpServer({ root, orchestrator, uiDirectory: join(repositoryRoot, "packages", "ui", "public") });
@@ -69,6 +72,7 @@ afterEach(async () => {
     item.orchestrator.ledger.close();
     rmSync(item.root, { recursive: true, force: true });
   }
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("local Forge API", () => {
@@ -76,9 +80,85 @@ describe("local Forge API", () => {
     const app = await fixture();
     const health = await fetch(app.baseUrl + "/api/health").then((response) => response.json());
     expect(health).toMatchObject({ harness: "stub", codex: "logged-in" });
+    expect(["up", "down"]).toContain(health.docker);
+    expect(["logged-in", "logged-out", "missing", "unavailable"]).toContain(health.codex);
+    expect(typeof health.codexMessage).toBe("string");
+    if (health.docker === "down") expect(typeof health.dockerMessage).toBe("string");
     const script = await fetch(app.baseUrl + "/app.js").then((response) => response.text());
     expect(script).toContain("Codex logged in");
     expect(script).toContain("Codex CLI missing");
+  });
+
+  it("checks Codex login through the same resolved binary used by CodexHarness", async () => {
+    const root = mkdtempSync(join(tmpdir(), "forge-health-codex-"));
+    temporaryRoots.push(root);
+    const shimDirectory = join(root, "codex shim directory");
+    mkdirSync(shimDirectory);
+    const shim = join(shimDirectory, process.platform === "win32" ? "fake codex.cmd" : "fake codex");
+    const invocationLog = join(root, "invocations.txt");
+    if (process.platform === "win32") {
+      writeFileSync(shim, '@echo off\r\necho %*>> "%FORGE_CODEX_TEST_LOG%"\r\nexit /b 0\r\n');
+    } else {
+      writeFileSync(shim, '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$FORGE_CODEX_TEST_LOG"\nexit 0\n');
+      chmodSync(shim, 0o755);
+    }
+
+    const previousBinary = process.env.FORGE_CODEX_BIN;
+    const previousLog = process.env.FORGE_CODEX_TEST_LOG;
+    process.env.FORGE_CODEX_BIN = shim;
+    process.env.FORGE_CODEX_TEST_LOG = invocationLog;
+    try {
+      const app = await fixture({ harness: new CodexHarness(), codexStatusProbe: null });
+      const health = await fetch(app.baseUrl + "/api/health").then((response) => response.json());
+      expect(health).toMatchObject({ harness: "codex", codex: "logged-in" });
+      expect(readFileSync(invocationLog, "utf8")).toContain("login status");
+    } finally {
+      if (previousBinary === undefined) delete process.env.FORGE_CODEX_BIN;
+      else process.env.FORGE_CODEX_BIN = previousBinary;
+      if (previousLog === undefined) delete process.env.FORGE_CODEX_TEST_LOG;
+      else process.env.FORGE_CODEX_TEST_LOG = previousLog;
+    }
+  });
+
+  it("preserves an unavailable Codex login-probe state in health", async () => {
+    const app = await fixture({ codexStatusProbe: async () => ({ state: "unavailable", message: "Codex status timed out." }) });
+    const health = await fetch(app.baseUrl + "/api/health").then((response) => response.json());
+    expect(health).toMatchObject({ codex: "unavailable", codexMessage: "Codex status timed out." });
+  });
+
+  it("marks Docker up only when the resolved binary reports a Server Version", async () => {
+    const root = mkdtempSync(join(tmpdir(), "forge-health-docker-"));
+    temporaryRoots.push(root);
+    const dockerDirectory = join(root, "%TEMP% & docker shim!");
+    mkdirSync(dockerDirectory);
+    const docker = join(dockerDirectory, process.platform === "win32" ? "fake docker.cmd" : "fake docker");
+    if (process.platform === "win32") {
+      writeFileSync(docker, '@echo off\r\nif "%FORGE_DOCKER_TEST_MODE%"=="slow-server" timeout /t 2 /nobreak > nul\r\nif "%FORGE_DOCKER_TEST_MODE%"=="server" goto server\r\nif "%FORGE_DOCKER_TEST_MODE%"=="slow-server" goto server\r\necho Client Version: 29.1.2\r\nexit /b 0\r\n:server\r\necho   Server Version: 29.1.2\r\nexit /b 0\r\n');
+    } else {
+      writeFileSync(docker, '#!/bin/sh\nif [ "$FORGE_DOCKER_TEST_MODE" = slow-server ]; then sleep 2; fi\nif [ "$FORGE_DOCKER_TEST_MODE" = server ] || [ "$FORGE_DOCKER_TEST_MODE" = slow-server ]; then echo "  Server Version: 29.1.2"; else echo "Client Version: 29.1.2"; fi\n');
+      chmodSync(docker, 0o755);
+    }
+
+    const previousBinary = process.env.FORGE_DOCKER_BIN;
+    const previousMode = process.env.FORGE_DOCKER_TEST_MODE;
+    process.env.FORGE_DOCKER_BIN = docker;
+    try {
+      process.env.FORGE_DOCKER_TEST_MODE = "slow-server";
+      const healthyApp = await fixture();
+      const healthy = await fetch(healthyApp.baseUrl + "/api/health").then((response) => response.json());
+      expect(healthy.docker).toBe("up");
+      expect(healthy.dockerMessage).toBeUndefined();
+
+      process.env.FORGE_DOCKER_TEST_MODE = "client-only";
+      const incompleteApp = await fixture();
+      const incomplete = await fetch(incompleteApp.baseUrl + "/api/health").then((response) => response.json());
+      expect(incomplete).toMatchObject({ docker: "down", dockerMessage: "docker info did not report a Server Version." });
+    } finally {
+      if (previousBinary === undefined) delete process.env.FORGE_DOCKER_BIN;
+      else process.env.FORGE_DOCKER_BIN = previousBinary;
+      if (previousMode === undefined) delete process.env.FORGE_DOCKER_TEST_MODE;
+      else process.env.FORGE_DOCKER_TEST_MODE = previousMode;
+    }
   });
 
   it("returns the exact Codex error when Planner cannot start", async () => {
@@ -120,6 +200,24 @@ describe("local Forge API", () => {
     expect(detail.runs[0]).not.toHaveProperty("input");
     expect(detail.runs[0]).not.toHaveProperty("worktreePath");
     expect(detail.item).not.toHaveProperty("evidenceUri");
+  });
+
+  it("redacts nested host worktree paths from provenance detail and evidence", async () => {
+    const app = await fixture();
+    const created = await post(app.baseUrl, "/api/run", { prompt: "Add a health endpoint" }).then((response) => response.json());
+    const id = created.item.id as string;
+    const evidenceDirectory = join(app.root, "evidence", "runs", id);
+    mkdirSync(evidenceDirectory, { recursive: true });
+    writeFileSync(join(evidenceDirectory, "provenance.json"), JSON.stringify({
+      promptHash: "a".repeat(64),
+      worktreePath: "C:\\Users\\private\\worktree",
+      roles: [{ role: "Implementer", worktreePath: "/home/private/worktree" }],
+    }));
+
+    const detail = await fetch(`${app.baseUrl}/api/work/${id}`).then((response) => response.json());
+    expect(detail.provenance).toEqual({ promptHash: "a".repeat(64), roles: [{ role: "Implementer" }] });
+    const evidence = await fetch(`${app.baseUrl}/api/work/${id}/evidence/provenance.json`).then((response) => response.json());
+    expect(evidence).toEqual(detail.provenance);
   });
 
   it("rejects a gate action at the wrong stage and refuses non-loopback serve hosts", async () => {

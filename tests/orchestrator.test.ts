@@ -337,6 +337,66 @@ describe("orchestrator", () => {
     ledger.close();
   });
 
+  it("records every Codex role with harness and worktree provenance", async () => {
+    const root = fixtureRepository();
+    const ledger = new Ledger(":memory:");
+    const harness = {
+      name: "codex",
+      async run(request: HarnessRequest) {
+        if (request.stage === "plan") {
+          writeFileSync(join(request.workspacePath, "plan.md"), "# Codex plan\n");
+          return { success: true, changedFiles: ["plan.md"], tokensUsed: 5, usdCost: 0, summary: "Plan created", model: "codex-contract-test" };
+        }
+        if (request.stage === "author-tests") {
+          const testPath = join(request.workspacePath, "demo-app", "tests", "health.test.ts");
+          mkdirSync(join(request.workspacePath, "demo-app", "tests"), { recursive: true });
+          writeFileSync(testPath, "// focused health test\n");
+          return { success: true, changedFiles: ["demo-app/tests/health.test.ts"], tokensUsed: 5, usdCost: 0, summary: "Test added", model: "codex-contract-test" };
+        }
+        if (request.stage === "implement") {
+          const appPath = join(request.workspacePath, "demo-app", "src", "app.ts");
+          writeFileSync(appPath, readFileSync(appPath, "utf8") + "\n// Codex implementation\n");
+          return { success: true, changedFiles: ["demo-app/src/app.ts"], tokensUsed: 5, usdCost: 0, summary: "Implementation added", model: "codex-contract-test" };
+        }
+        if (!request.workspacePath) throw new Error("Reviewer context path is required");
+        expect(readdirSync(request.workspacePath)).toEqual([]);
+        return { success: true, changedFiles: [], tokensUsed: 5, usdCost: 0, summary: "Review approved", approved: true, model: "codex-contract-test" };
+      },
+    };
+    const executor: TestExecutor = { async run() { return { exitCode: 0, stdout: "1 test passed", stderr: "" }; } };
+    const orchestrator = new Orchestrator(root, { ledger, harness, worktrees: new GitWorktreeManager(root), testExecutor: executor });
+    const plan = await orchestrator.createFromPrompt("add a GET /health endpoint to demo-app");
+    await expect(orchestrator.approve(plan.id, "plan")).resolves.toMatchObject({ currentStage: "merge-gate", status: "waiting-approval" });
+    const completed = await orchestrator.approve(plan.id, "merge");
+    expect(completed.status).toBe("completed");
+
+    const provenance = JSON.parse(readFileSync(join(root, completed.evidenceUri!, "provenance.json"), "utf8")) as {
+      workId: string;
+      harness: string;
+      evidencePaths: string[];
+      stages: Array<{ role: string | null; stage: string; harness: string; model: string; promptHash: string; sandboxId: string | null; worktreePath: string | null }>;
+    };
+    expect(provenance).toMatchObject({ workId: plan.id, harness: "codex", model: "codex-contract-test" });
+    const codexStages = provenance.stages.filter((stage) => ["Planner", "Test Author", "Implementer", "Independent Reviewer"].includes(stage.role ?? ""));
+    expect(codexStages).toHaveLength(4);
+    for (const stage of codexStages) {
+      expect(stage).toMatchObject({
+        harness: "codex",
+        model: "codex-contract-test",
+        promptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        sandboxId: expect.any(String),
+        worktreePath: expect.any(String),
+      });
+    }
+    expect(provenance.evidencePaths).toContain(`evidence/runs/${plan.id}/plan.md`);
+    expect(provenance.evidencePaths).toContain(`evidence/runs/${plan.id}/test-output.txt`);
+    const implement = codexStages.find((stage) => stage.stage === "implement")!;
+    const verify = provenance.stages.find((stage) => stage.stage === "verify-in-fresh-sandbox")!;
+    expect(verify.sandboxId).not.toBe(implement.sandboxId);
+    expect(provenance.evidencePaths).toContain(`evidence/runs/${plan.id}/provenance.json`);
+    ledger.close();
+  });
+
   it("resumes draft packaging after a crash between merge approval and the bundle write", async () => {
     const root = fixtureRepository();
     const ledger = new Ledger(":memory:");

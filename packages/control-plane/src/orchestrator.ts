@@ -10,7 +10,7 @@ import {
   type ProvenanceRecord,
 } from "evidence";
 import { Ledger, type ApprovalRecord, type Gate, type Role, type RunRecord, type WorkflowStage } from "ledger";
-import { CodexHarnessError, DockerSandbox, GitWorktreeManager, buildCodexPrompt, type CodexLoginStatus, probeCodexLoginStatus, type HarnessAdapter, type HarnessRequest, type HarnessResult, type WorktreeSandbox } from "worker";
+import { CodexHarnessError, DockerSandbox, GitWorktreeManager, buildCodexPrompt, resolveHostBinary, type CodexLoginStatus, probeCodexLoginStatus, type HarnessAdapter, type HarnessRequest, type HarnessResult, type WorktreeSandbox } from "worker";
 import { createHarnessAdapter, loadFactoryConfig, type FactoryConfig } from "./factory.js";
 
 export interface TestResult {
@@ -53,7 +53,7 @@ export interface OrchestratorOptions {
   worktrees?: GitWorktreeManager;
   testExecutor?: TestExecutor;
   now?: () => Date;
-  codexStatusProbe?: () => Promise<CodexLoginStatus>;
+  codexStatusProbe?: (executable: string | null) => Promise<CodexLoginStatus>;
 }
 
 export interface WorkItemView {
@@ -145,7 +145,7 @@ export class Orchestrator {
   readonly worktrees: GitWorktreeManager;
   readonly testExecutor: TestExecutor;
   private readonly now: () => Date;
-  private readonly codexStatusProbe: () => Promise<CodexLoginStatus>;
+  private readonly codexStatusProbe: (executable: string | null) => Promise<CodexLoginStatus>;
 
   constructor(root: string, options: OrchestratorOptions = {}) {
     this.root = resolve(root);
@@ -155,11 +155,13 @@ export class Orchestrator {
     this.worktrees = options.worktrees ?? new GitWorktreeManager(this.root, this.config.sandbox.image);
     this.testExecutor = options.testExecutor ?? new DockerTestExecutor(this.config.budgets.defaults.wall_clock_seconds * 1000);
     this.now = options.now ?? (() => new Date());
-    this.codexStatusProbe = options.codexStatusProbe ?? probeCodexLoginStatus;
+    this.codexStatusProbe = options.codexStatusProbe ?? ((executable) => probeCodexLoginStatus({ executable }));
   }
 
   getCodexLoginStatus(): Promise<CodexLoginStatus> {
-    return this.codexStatusProbe();
+    const harness = this.harness as HarnessAdapter & { executablePath?: string | null };
+    const executable = harness.executablePath === undefined ? resolveHostBinary("codex") : harness.executablePath;
+    return this.codexStatusProbe(executable);
   }
 
   async createFromPrompt(prompt: string): Promise<NonNullable<ReturnType<Ledger["getWorkItem"]>>> {
